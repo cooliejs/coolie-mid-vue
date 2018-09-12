@@ -2,17 +2,16 @@
  * 适配 vue 组件
  * @author ydr.me
  * @create 2018年09月11日12:51:57
+ * @update 2018年09月12日15:14:57
  */
 
 
 'use strict';
 
-var console = require('blear.node.console');
 var debug = require('blear.node.debug');
 var array = require('blear.utils.array');
 var object = require('blear.utils.object');
 var random = require('blear.utils.random');
-var string = require('blear.utils.string');
 var fs = require('fs');
 var uglify = require("uglify-js");
 var compiler = require('vue-template-compiler');
@@ -80,25 +79,46 @@ function rewriteVueComponentProperty() {
     return function (options) {
         var coolie = this;
         var walkTemplateProperty = function (node) {
+            // 前注释必须包含 @coolievue
+            var match = hasCoolievueComment(node.start.comments_before);
+            var right = null;
+            var startPos = 0;
+            var endPos = 0;
+            var type = 0;
+
+            // template 等号属性
             if (
-                // template 属性
-                node.key === 'template' &&
-                // 前注释必须包含 @coolievue
-                hasCoolievueComment(node.start.comments_before)
+                match &&
+                node.body && node.body.operator === '=' &&
+                node.body.left && node.body.left.property === 'template'
             ) {
-                // template: require('balabala')
-                if (
-                    node.value &&
-                    node.value.expression && node.value.expression.name === 'require' &&
-                    node.value.args &&
-                    (node.value.args.length === 1 || node.value.args.length === 2)
-                ) {
-                    replaceTemplateProperty(node);
-                } else {
-                    debug.warn('coolie-mid-vue', options.file);
-                    debug.warn('coolie-mid-vue', '不支持非 require 方式引用的 template 属性转换');
-                    return options;
-                }
+                right = node.body.right;
+                startPos = node.body.left.end.pos;
+                endPos = node.body.right.end.endpos;
+                type = 1;
+            }
+            // template 冒号属性
+            else if (
+                match &&
+                node.key === 'template'
+            ) {
+                right = node.value;
+                startPos = node.start.pos;
+                endPos = node.end.endpos;
+                type = 2;
+            }
+
+            var args = null;
+            if (
+                right &&
+                right.expression &&
+                right.expression.name === 'require' &&
+                right.args &&
+                right.args.length &&
+                (right.args.length === 1 || right.args.length === 2)
+            ) {
+                args = right.args;
+                replaceTemplateProperty(args, startPos, endPos, type);
             }
         };
         var hasCoolievueComment = function (comments) {
@@ -113,9 +133,15 @@ function rewriteVueComponentProperty() {
 
             return found;
         };
-        var replaceTemplateProperty = function (node) {
-            var arg0 = node.value.args[0];
-            var arg1 = node.value.args[1];
+        var replaceTemplateProperty = function (args, startPos, endPos, type) {
+            var operator = {
+                // type1: template = require('abc.html')
+                1: ' = ',
+                // type2: template: require('abc.html')
+                2: ': '
+            }[type];
+            var arg0 = args[0];
+            var arg1 = args[1];
             var res = coolie.resolveModule(
                 arg0 && arg0.value,
                 arg1 && arg1.value,
@@ -131,19 +157,14 @@ function rewriteVueComponentProperty() {
                     value: virtualName,
                     quote: arg0.quote
                 }).print_to_string({beautify: true});
-                var startPos = node.start.pos;
-                var endPos = arg1 ?
-                    arg1.end.endpos :
-                    arg0.end.endpos;
                 var before = options.code.slice(0, startPos);
                 var after = options.code.slice(endPos);
-                options.code = before + 'render: require(' + replacement + after;
-            } else {
-                debug.warn('coolie-mid-vue', options.file);
-                debug.warn('coolie-mid-vue', 'template 属性的 require 管道类型仅支持 html|text');
-                debug.warn('coolie-mid-vue', '请');
-                return options;
+                options.code = before + 'render' + operator + 'require(' + replacement + ')' + after;
+                return;
             }
+
+            debug.warn('coolie-mid-vue', options.file);
+            debug.warn('coolie-mid-vue', 'template 属性的 require 管道类型仅支持 html|text');
         };
         var generateVritualFile = function (res) {
             var id = res.id;
@@ -196,8 +217,7 @@ function rewriteVueComponentProperty() {
             try {
                 ast = uglify.parse(options.code);
             } catch (err) {
-                console.log();
-                debug.error('parse module', file);
+                debug.error('parse module', options.file);
                 debug.error('parse module', '语法有误，无法解析，请检查。');
                 debug.error('parse module', err.message);
                 return;
